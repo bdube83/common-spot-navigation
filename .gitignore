@@ -1,0 +1,52 @@
+# Gradle files
+.gradle/
+build/
+*/build/
+*/intermediates/
+*/generated/
+*/bin/
+*/local.properties
+
+# Gradle caches
+**/build/
+**/out/
+!gradle-wrapper.jar
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/*.iml
+.idea/workspace.xml
+
+# Ignore IntelliJ project and workspace files
+*.iml
+.idea/
+*.ipr
+*.iws
+
+# Ignore Android Studio generated files
+*.apk
+*.ap_
+*.dex
+*.class
+*.log
+*.idx
+*.seed
+*.key
+*.so
+
+# Miscellaneous
+*.DS_Store
+*.cxx
+*.hprof
+*.jar
+*.keystore
+*.swp
+*.lock
+.env
+
+# Ignore local configuration files
+/local.properties
+.idea/*
+
+# Mac OS files
+.DS_Store
