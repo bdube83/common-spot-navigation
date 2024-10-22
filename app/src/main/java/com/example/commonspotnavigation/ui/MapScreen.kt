@@ -2,219 +2,431 @@ package com.example.commonspotnavigation.ui
 
 import android.content.Context
 import androidx.compose.runtime.*
-import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.ui.Modifier
+import com.mapbox.mapboxsdk.maps.MapView
+import com.mapbox.mapboxsdk.maps.MapboxMap
+import com.mapbox.mapboxsdk.camera.CameraPosition
+import com.mapbox.mapboxsdk.camera.CameraUpdateFactory
+import com.mapbox.mapboxsdk.geometry.LatLng
+import kotlinx.coroutines.launch
+import com.example.commonspotnavigation.utils.geocodeAddress
+import CustomInfoWindow
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Polyline
-import org.osmdroid.views.overlay.infowindow.InfoWindow
 import com.example.commonspotnavigation.R
-import androidx.compose.ui.Alignment
+import com.example.commonspotnavigation.navigation.NavigationManager
+import com.example.commonspotnavigation.utils.NavigationStep
+import com.example.commonspotnavigation.utils.OSRMRouteHelper
+import com.mapbox.mapboxsdk.geometry.LatLngBounds
+import com.mapbox.mapboxsdk.annotations.Polyline
+import java.lang.Math.*
+import kotlin.math.pow
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapScreen(context: Context, currentLocation: GeoPoint) {
-    var startPoint by remember { mutableStateOf(currentLocation) }
-    var endPoint by remember { mutableStateOf<GeoPoint?>(null) }
+fun MapScreen(context: Context, currentLocation: LatLng) {
     var endAddress by remember { mutableStateOf("") }
-
+    var mapboxMap by remember { mutableStateOf<MapboxMap?>(null) }
+    val mapView = remember { MapView(context) }
     val coroutineScope = rememberCoroutineScope()
+    var isLoading by remember { mutableStateOf(false) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
+    var destinationPoint by remember { mutableStateOf<LatLng?>(null) }
+    var estimatedTravelTime by remember { mutableStateOf<String?>(null) }
+    var currentRouteLine by remember { mutableStateOf<Polyline?>(null) }
+    var navigationSteps by remember { mutableStateOf<List<NavigationStep>>(emptyList()) }
+    var currentStepIndex by remember { mutableStateOf(0) }
+    var isNavigationActive by remember { mutableStateOf(false) }
+
+
+    suspend fun drawRoute(
+        map: MapboxMap,
+        origin: LatLng,
+        destination: LatLng
+    ): Polyline? {
+        // Clear the previous route line if it exists
+        currentRouteLine?.remove()
+
+        // Get the route points and travel time from OSRM
+        val routeData = OSRMRouteHelper.getRoute(origin, destination)
+
+        return if (routeData != null) {
+            val (routePoints, durationInSeconds, steps) = routeData
+
+            // Update navigation steps
+                navigationSteps = steps
+            currentStepIndex = 0 // Start from the first step
+
+            // Draw the new route line
+            val newRouteLine = OSRMRouteHelper.drawRoute(map, routePoints)
+            currentRouteLine = newRouteLine  // Update the currentRouteLine reference
+
+            // Format the estimated travel time
+            val travelTime = if (durationInSeconds < 3600) {
+                "${durationInSeconds / 60} minutes"
+            } else {
+                "${durationInSeconds / 3600} hours ${durationInSeconds % 3600 / 60} minutes"
+            }
+
+            // Update the state variable with the estimated travel time
+            estimatedTravelTime = travelTime
+
+            // Fit the camera to the route bounds
+            val boundsBuilder = LatLngBounds.Builder()
+            for (point in routePoints) {
+                boundsBuilder.include(point)
+            }
+            val bounds = boundsBuilder.build()
+            if (!isNavigationActive) {
+                map.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds, 100))
+            }
+
+            newRouteLine
+        } else {
+            // Handle no route found
+            estimatedTravelTime = null  // Reset the travel time
+            null
+        }
+    }
+
+    // Manage MapView lifecycle
+    DisposableEffect(key1 = mapView) {
+        mapView.onCreate(null)
+        mapView.onStart()
+        mapView.onResume()
+
+        mapView.getMapAsync { mapboxMap ->
+            mapboxMap.uiSettings.isLogoEnabled = false
+            mapboxMap.uiSettings.isAttributionEnabled = false
+        }
+
+        onDispose {
+            mapView.onPause()
+            mapView.onStop()
+            mapView.onDestroy()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // MapView placed in the background
         AndroidView(factory = {
-            val mapView = MapView(context)
-            mapView.setMultiTouchControls(true)
-            mapView.controller.setZoom(15.0)
-            mapView.controller.setCenter(startPoint)
+            mapView.apply {
+                getMapAsync { mapboxMapLoaded ->
+                    val apiKey = ""
+                    val styleUrl = "https://api.maptiler.com/maps/streets-v2/style.json?key=$apiKey"
 
-            // Function to add markers and route line
-            fun updateMap() {
-                mapView.overlays.clear()
-
-                // Create start marker (current location)
-                val startMarker = Marker(mapView).apply {
-                    position = startPoint
-                    title = "Current Location"
-                    snippet = "This is your current location"
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-
-                    // Set custom icon for the marker
-                    icon = context.getDrawable(R.drawable.ic_current_location_marker) // Replace with your drawable resource
-
-                    // Set the custom info window
-                    val infoWindowView = ComposeView(context)
-                    infoWindowView.id = R.id.compose_view // Ensure to have an ID for finding the view later
-                    mapView.addView(infoWindowView)
-
-                    infoWindow = CustomInfoWindow(infoWindowView, mapView)
-                }
-
-                // Create end marker if available
-                endPoint?.let { endPoint ->
-                    val endMarker = Marker(mapView).apply {
-                        position = endPoint
-                        title = "Destination"
-                        snippet = "This is the destination"
-                        setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-
-                        // Set custom icon for the marker
-                        icon = context.getDrawable(R.drawable.ic_destination_marker) // Replace with your drawable resource
-
-                        // Set the custom info window
-                        val infoWindowView = ComposeView(context)
-                        infoWindowView.id = R.id.compose_view // Ensure to have an ID for finding the view later
-                        mapView.addView(infoWindowView)
-
-                        infoWindow = CustomInfoWindow(infoWindowView, mapView)
+                    mapboxMapLoaded.setStyle(styleUrl) { style ->
+                        // Map is ready
+                        mapboxMap = mapboxMapLoaded
                     }
-
-                    // Add markers to the map
-                    mapView.overlays.add(endMarker)
-
-                    // Add route line between start and end point
-                    val routeLine = Polyline().apply {
-                        setPoints(listOf(startPoint, endPoint))
-                        color = context.getColor(R.color.purple_700) // Use a color similar to the screenshot (replace with your color resource)
-                        width = 8.0f // Set line width
-                    }
-                    mapView.overlays.add(routeLine)
                 }
-
-                // Always add the current location marker
-                mapView.overlays.add(startMarker)
-
-                mapView.invalidate() // Refresh the map
             }
-
-            // Update the map initially
-            updateMap()
-
-            mapView
-        }, update = { mapView ->
-            // Update the map whenever the end point changes
-            mapView.controller.setCenter(startPoint)
-            mapView.overlays.clear()
-
-            val startMarker = Marker(mapView).apply {
-                position = startPoint
-                title = "Current Location"
-                snippet = "This is your current location"
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-
-                // Set custom icon for the marker
-                icon = context.getDrawable(R.drawable.ic_current_location_marker) // Replace with your drawable resource
-
-                // Set the custom info window
-                val infoWindowView = ComposeView(context)
-                infoWindowView.id = R.id.compose_view
-                mapView.addView(infoWindowView)
-
-                infoWindow = CustomInfoWindow(infoWindowView, mapView)
-            }
-
-            // Add the end marker if available
-            endPoint?.let { endPoint ->
-                val endMarker = Marker(mapView).apply {
-                    position = endPoint
-                    title = "Destination"
-                    snippet = "This is the destination"
-                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-
-                    // Set custom icon for the marker
-                    icon = context.getDrawable(R.drawable.ic_destination_marker) // Replace with your drawable resource
-
-                    // Set the custom info window
-                    val infoWindowView = ComposeView(context)
-                    infoWindowView.id = R.id.compose_view
-                    mapView.addView(infoWindowView)
-
-                    infoWindow = CustomInfoWindow(infoWindowView, mapView)
-                }
-
-                mapView.overlays.add(endMarker)
-
-                val routeLine = Polyline().apply {
-                    setPoints(listOf(startPoint, endPoint))
-                    color = context.getColor(R.color.purple_700) // Use a color similar to the screenshot (replace with your color resource)
-                    width = 8.0f // Set line width
-                }
-                mapView.overlays.add(routeLine)
-            }
-
-            mapView.overlays.add(startMarker)
-
-            mapView.invalidate()
         },
+            update = {
+                mapboxMap?.let { map ->
+                    if (currentLocation.latitude != 0.0 && currentLocation.longitude != 0.0) {
+
+                        val bearing = if (isNavigationActive && navigationSteps.isNotEmpty()) {
+                            NavigationManager.getBearingToNextStep(currentLocation, navigationSteps[currentStepIndex].maneuverLocation)
+                        } else {
+                            0.0
+                        }
+
+                        val position = CameraPosition.Builder()
+                            .target(currentLocation)
+                            .zoom(if (isNavigationActive) 18.0 else 15.0)
+                            .tilt(if (isNavigationActive) 45.0 else 0.0)
+                            //.bearing(bearing.toDouble())
+                            .build()
+                        map.animateCamera(CameraUpdateFactory.newCameraPosition(position))
+
+                        map.clear()
+
+                        // Add current location marker
+                        val customInfoWindow = CustomInfoWindow(context, mapView, map)
+
+                        customInfoWindow.displayMarkerInfo(
+                            "Current Location",
+                            "Your current location",
+                            currentLocation.latitude,
+                            currentLocation.longitude,
+                            if (isNavigationActive) R.drawable.ic_current_location_marker else R.drawable.ic_current_location_marker
+                        )
+
+                        // Draw route and add destination marker if destination is set
+                        destinationPoint?.let { destPoint ->
+                            coroutineScope.launch {
+                                drawRoute(map, currentLocation, destPoint)
+                            }
+                            val destinationInfoWindow = CustomInfoWindow(context, mapView, map)
+                            destinationInfoWindow.displayMarkerInfo(
+                                "Destination",
+                                endAddress,
+                                destPoint.latitude,
+                                destPoint.longitude
+                            )
+                        }
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .align(Alignment.Center)
         )
 
-        // Column containing input field and button placed in the foreground
+        Text(
+            text = "CommonLink ©",
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .background(color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
+                .padding(4.dp),
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        // Foreground UI
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(8.dp)
-                .zIndex(1f) // Ensure the inputs are on top of the map
+                .zIndex(1f)
                 .align(Alignment.TopCenter)
         ) {
-            TextField(
-                value = endAddress,
-                onValueChange = { endAddress = it },
-                label = { Text("End Address") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-            )
+            if (!isNavigationActive) {
+                TextField(
+                    value = endAddress,
+                    onValueChange = {
+                        // Existing code with navigation reset
+                        endAddress = it
 
-            Button(
-                onClick = {
-                    coroutineScope.launch {
-                        // Simulated Geocoding Function to convert address to GeoPoint
-                        val newEndPoint = geocodeAddress(endAddress)
+                        // Reset destination and route when user starts typing
+                        destinationPoint = null
+                        currentRouteLine?.remove()
+                        currentRouteLine = null
+                        estimatedTravelTime = null
+                        navigationSteps = emptyList()
+                        isNavigationActive = false // Reset navigation state
+                        currentStepIndex = 0
 
-                        // Update the end point
-                        if (newEndPoint != null) {
-                            endPoint = newEndPoint
+                        // Move camera back to the current location
+                        mapboxMap?.animateCamera(
+                            CameraUpdateFactory.newCameraPosition(
+                                CameraPosition.Builder()
+                                    .target(currentLocation)
+                                    .zoom(15.0)
+                                    .build()
+                            )
+                        )
+                    },
+                    label = { Text("Where to?") },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                )
+
+                if (estimatedTravelTime === null) {
+                    Button(
+                        onClick = {
+                            coroutineScope.launch {
+                                // Existing code to fetch route
+                                isLoading = true
+                                errorMessage = null
+                                estimatedTravelTime = null  // Reset estimated travel time
+
+                                val inputAddress = endAddress.trim()
+
+                                if (inputAddress.isBlank()) {
+                                    errorMessage = "Please enter an address."
+                                    isLoading = false
+                                    return@launch
+                                }
+
+                                val newEndPoint = geocodeAddress(inputAddress)
+                                isLoading = false
+                                if (newEndPoint != null) {
+                                    destinationPoint = newEndPoint
+                                    mapboxMap?.let { map ->
+                                        map.clear()
+
+                                        // Add marker at destination
+                                        val customInfoWindow =
+                                            CustomInfoWindow(context, mapView, map)
+                                        customInfoWindow.displayMarkerInfo(
+                                            "Destination",
+                                            endAddress,
+                                            newEndPoint.latitude,
+                                            newEndPoint.longitude
+                                        )
+
+                                        // Draw route from current location to destination
+                                        drawRoute(map, currentLocation, newEndPoint)
+                                    }
+                                } else {
+                                    errorMessage = "Address not recognized."
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp),
+                        enabled = !isLoading
+                    ) {
+                        if (isLoading) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        } else {
+                            Text("Go")
                         }
                     }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-            ) {
-                Text("Update Route")
+                }
+            }
+
+            // Display error message
+            if (errorMessage != null) {
+                Text(
+                    text = errorMessage!!,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+            }
+
+            // Display estimated travel time
+            if (estimatedTravelTime != null) {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .background(
+                            color = Color.Black.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .align(Alignment.CenterHorizontally)
+                ) {
+                    Text(
+                        text = "Estimated travel time: $estimatedTravelTime",
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+
+            if (estimatedTravelTime != null && !isNavigationActive) {
+                Button(
+                    onClick = {
+                        isNavigationActive = true
+                        currentStepIndex = 0
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                ) {
+                    Text("Start Navigation")
+                }
+            }
+
+            // Navigation UI
+            if (isNavigationActive) {
+                // Display current instruction
+                if (navigationSteps.isNotEmpty() && currentStepIndex < navigationSteps.size) {
+                    val currentInstruction = navigationSteps[currentStepIndex].instruction
+                    Box(
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .background(
+                                color = Color.Black.copy(alpha = 0.7f),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                            .align(Alignment.CenterHorizontally)
+                    ) {
+                        Text(
+                            text = currentInstruction,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                } else {
+                    // Navigation completed
+                    Text(
+                        text = "You have arrived at your destination.",
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .align(Alignment.CenterHorizontally),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+
+                // Navigation Controls
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    Button(
+                        onClick = {
+                            // Implement pause functionality if needed
+                        },
+                        enabled = false, // Set to true if implementing pause
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        )
+                    ) {
+                        Text("Pause")
+                    }
+                    Button(
+                        onClick = {
+                            // Cancel navigation
+                            isNavigationActive = false
+                            currentStepIndex = 0
+                            navigationSteps = emptyList()
+                            estimatedTravelTime = null
+                            endAddress = ""
+                            destinationPoint = null
+                            currentRouteLine?.remove()
+                            currentRouteLine = null
+
+                            // Move camera back to the current location
+                            mapboxMap?.animateCamera(
+                                CameraUpdateFactory.newCameraPosition(
+                                    CameraPosition.Builder()
+                                        .target(currentLocation)
+                                        .zoom(15.0)
+                                        .build()
+                                )
+                            )
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondary
+                        )
+                    ) {
+                        Text("Cancel Navigation")
+                    }
+                }
+            }
+
+
+        }
+    }
+
+    LaunchedEffect(currentLocation) {
+        if (isNavigationActive && navigationSteps.isNotEmpty() && currentStepIndex < navigationSteps.size) {
+            val nextStep = navigationSteps[currentStepIndex]
+            val shouldAdvance = NavigationManager.shouldAdvanceToNextStep(currentLocation, nextStep)
+            if (shouldAdvance) {
+                currentStepIndex++
             }
         }
     }
-}
 
-// Placeholder geocoding function to simulate converting an address to a GeoPoint
-suspend fun geocodeAddress(address: String): GeoPoint? {
-    return withContext(Dispatchers.IO) {
-        // Simulate network delay
-        kotlinx.coroutines.delay(1000)
-
-        // In a real application, you'd perform a network request to a geocoding API here
-        // Example: Using OpenStreetMap's Nominatim or Google Maps Geocoding API
-
-        // For simulation, we'll return a dummy GeoPoint based on the address string
-        when (address.lowercase()) {
-            "cape town" -> GeoPoint(-33.9249, 18.4241) // Example for Cape Town
-            "jhb", "johannesburg" -> GeoPoint(-26.2041, 28.0473) // Example for Johannesburg
-            "san francisco" -> GeoPoint(37.7749, -122.4194) // Example for San Francisco
-            "los angeles" -> GeoPoint(34.0522, -118.2437) // Example for Los Angeles
-            else -> null // Return null if address is not recognized
-        }
-    }
 }
