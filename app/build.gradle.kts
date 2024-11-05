@@ -64,4 +64,15 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     implementation("org.osmdroid:osmdroid-android:6.1.11")
+    implementation(files("libs/osmbonuspack_6.9.0.aar"))
+    implementation("org.osmdroid:osmdroid-android:6.1.13")
+    implementation("org.apache.commons:commons-lang3:3.8.1")
+    implementation("com.google.code.gson:gson:2.8.6")
+    implementation("com.squareup.okhttp3:okhttp:4.7.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.0")
+    implementation("org.maplibre.gl:android-sdk:10.0.2")
+    implementation("androidx.compose.ui:ui:1.4.0")
+    implementation("androidx.compose.foundation:foundation-layout:1.4.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+
 }
